@@ -25,9 +25,9 @@ SCALE = 0.5
 API_KEY_MIN_LEN = 16
 
 # real-world tuned thresholds
-MAX_HORIZONTAL_GAP = int(3 * PX_PER_CM)  # ~3 cm to right
+MAX_HORIZONTAL_GAP = int(7 * PX_PER_CM)  # ~3 cm to right
 MAX_VERTICAL_GAP = int(2 * PX_PER_CM)    # ~2 cm below
-API_KEY_PADDING = int(0.7 * PX_PER_CM)   # ~0.7 cm blur margin
+API_KEY_PADDING = int(0.4 * PX_PER_CM)   # ~0.7 cm blur margin
 
 # ---- Setup ----
 sct = mss.mss()
@@ -104,6 +104,10 @@ while True:
                      for i in range(n) if data["text"][i].strip()]
 
             for i, (label, lb) in enumerate(words):
+                results = analyzer.analyze(text=label, language="en")
+                results = [r for r in results if r.entity_type in SENSITIVE_TYPES]
+                if results:
+                    sensitive_boxes.append(lb)
                 if not api_label_re.search(label):
                     continue
                 lx, ly, lw, lh = lb
@@ -128,11 +132,7 @@ while True:
                         api_blur_boxes.append((x1, y1, x2-x1, y2-y1))
                         break
                         
-                # optional Presidio
-                results = analyzer.analyze(text=label, language="en")
-                results = [r for r in results if r.entity_type in SENSITIVE_TYPES]
-                if results:
-                    sensitive_boxes.append(lb)
+    
         # ---- blur boxes ----
         for (x, y, w, h) in api_blur_boxes + sensitive_boxes:
             roi = frame[y:y+h, x:x+w]
