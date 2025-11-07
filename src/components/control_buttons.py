@@ -14,6 +14,8 @@ from styles.modern_styles import (
 class ControlButtons(QFrame):
     start_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
+    stream_clicked = pyqtSignal()
+    stop_stream_clicked = pyqtSignal()
     
     def __init__(self, recordings_dir):
         super().__init__()
@@ -66,6 +68,31 @@ class ControlButtons(QFrame):
         divider.setStyleSheet(f"background-color: {COLORS['border_primary']}; border: none; max-height: 1px; margin: 8px 0;")
         layout.addWidget(divider)
         
+        # Stream button
+        self.stream_button = QPushButton("📡  START LIVE STREAM")
+        self.stream_button.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        self.stream_button.setFixedHeight(56)
+        self.stream_button.setStyleSheet(get_button_primary())
+        self.stream_button.clicked.connect(self.stream_clicked.emit)
+        self.stream_button.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.stream_button)
+        
+        # Stop stream button
+        self.stop_stream_button = QPushButton("⏹  STOP LIVE STREAM")
+        self.stop_stream_button.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        self.stop_stream_button.setFixedHeight(56)
+        self.stop_stream_button.setStyleSheet(get_button_danger())
+        self.stop_stream_button.setEnabled(False)
+        self.stop_stream_button.clicked.connect(self.stop_stream_clicked.emit)
+        self.stop_stream_button.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.stop_stream_button)
+        
+        # Divider
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.HLine)
+        divider2.setStyleSheet(f"background-color: {COLORS['border_primary']}; border: none; max-height: 1px; margin: 8px 0;")
+        layout.addWidget(divider2)
+        
         # Output directory info
         output_title = QLabel("💾  Output Location")
         output_title.setFont(QFont(FONTS['family_primary'], 12, QFont.Bold))
@@ -84,3 +111,8 @@ class ControlButtons(QFrame):
         """Update button states based on recording status"""
         self.start_button.setEnabled(not is_recording)
         self.stop_button.setEnabled(is_recording)
+    
+    def set_streaming_state(self, is_streaming):
+        """Update button states based on streaming status"""
+        self.stream_button.setEnabled(not is_streaming)
+        self.stop_stream_button.setEnabled(is_streaming)

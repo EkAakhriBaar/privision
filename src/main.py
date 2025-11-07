@@ -5,11 +5,12 @@ Clean, professional design with proper spacing and separation of concerns
 import sys
 import threading
 import time
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QFrame, QPushButton, QLabel
+    QScrollArea, QFrame, QPushButton, QLabel, QInputDialog
 )
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
@@ -31,6 +32,9 @@ class RecorderSignals(QObject):
     recording_started = pyqtSignal()
     recording_stopped = pyqtSignal()
     recording_error = pyqtSignal(str)
+    streaming_started = pyqtSignal()
+    streaming_stopped = pyqtSignal()
+    streaming_error = pyqtSignal(str)
 
 
 class LivePreviewWindow(QMainWindow):
@@ -89,9 +93,21 @@ class ScreenRecorder(QMainWindow):
         self.frame_count = 0
         self.start_time = None
         
+        # Streaming state
+        self.streaming = False
+        self.streaming_thread = None
+        self.ffmpeg_process = None
+        self.stream_key = None
+        self.rtmp_url = "rtmp://a.rtmp.youtube.com/live2/"
+        
         # Setup recordings directory
         self.recordings_dir = Path(__file__).parent.parent / "recordings"
         self.recordings_dir.mkdir(exist_ok=True)
+        
+        # Webcam setup
+        self.webcam = None
+        self.webcam_enabled = True
+        self.webcam_size = (320, 240)  # Width, Height for webcam overlay
         
         # Face detection setup
         self.face_cascade = cv2.CascadeClassifier(
@@ -249,6 +265,8 @@ class ScreenRecorder(QMainWindow):
         self.control_buttons = ControlButtons(self.recordings_dir)
         self.control_buttons.start_clicked.connect(self.start_recording)
         self.control_buttons.stop_clicked.connect(self.stop_recording)
+        self.control_buttons.stream_clicked.connect(self.start_streaming)
+        self.control_buttons.stop_stream_clicked.connect(self.stop_streaming)
         middle_row.addWidget(self.control_buttons, 1)
         
         content_layout.addLayout(middle_row)
@@ -308,8 +326,8 @@ class ScreenRecorder(QMainWindow):
             self.blur_enabled = self.settings_window.is_blur_enabled()
             self.statusBar().showMessage("✅ Settings saved successfully!")
     
-    def apply_face_blur(self, frame):
-        """Detect faces and blur them"""
+    def apply_face_blur(self, frame, webcam_rect=None):
+        """Detect faces and blur them (excluding webcam area)"""
         if not self.blur_enabled or self.face_cascade.empty():
             return frame
         
@@ -328,6 +346,13 @@ class ScreenRecorder(QMainWindow):
             ]
         
         for (x, y, w, h) in self.faces_cache:
+            # Skip blurring if face is in webcam area
+            if webcam_rect:
+                wx, wy, ww, wh = webcam_rect
+                # Check if face overlaps with webcam area
+                if not (x + w < wx or x > wx + ww or y + h < wy or y > wy + wh):
+                    continue  # Skip this face as it's in the webcam area
+            
             x1, y1 = max(0, x), max(0, y)
             x2, y2 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
             roi = frame[y1:y2, x1:x2]
@@ -342,6 +367,35 @@ class ScreenRecorder(QMainWindow):
         self.frame_count = 0
         self.detect_frame_idx = 0
         self.start_time = datetime.now()
+        
+        # Initialize webcam (optional - continue if it fails)
+        if self.webcam_enabled:
+            try:
+                # Try to initialize webcam with proper settings
+                self.webcam = cv2.VideoCapture(0)
+                
+                # Give webcam time to initialize
+                time.sleep(0.5)
+                
+                if self.webcam and self.webcam.isOpened():
+                    self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    self.webcam.set(cv2.CAP_PROP_FPS, 30)
+                    self.webcam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for live feed
+                    
+                    # Test if webcam actually works
+                    ret, test_frame = self.webcam.read()
+                    if ret and test_frame is not None:
+                        print("✅ Webcam initialized successfully")
+                    else:
+                        print("⚠️  Webcam opened but not reading frames")
+                        self.webcam = None
+                else:
+                    print("⚠️  Webcam not available - recording without webcam")
+                    self.webcam = None
+            except Exception as e:
+                print(f"⚠️  Failed to initialize webcam: {e}")
+                self.webcam = None
         
         # Update UI
         self.control_buttons.set_recording_state(True)
@@ -362,6 +416,95 @@ class ScreenRecorder(QMainWindow):
         
         self.recorder_signals.recording_started.emit()
     
+    def overlay_webcam(self, frame):
+        """Overlay webcam feed on the bottom-right corner"""
+        try:
+            if not self.webcam:
+                return frame, None
+            
+            # Check if webcam is opened
+            if not self.webcam.isOpened():
+                print("Webcam not opened, trying to reconnect...")
+                try:
+                    self.webcam.open(0)
+                except:
+                    pass
+                
+                if not self.webcam or not self.webcam.isOpened():
+                    return frame, None
+            
+            ret, webcam_frame = self.webcam.read()
+            if not ret or webcam_frame is None:
+                return frame, None
+            
+            # Flip webcam frame horizontally (mirror effect)
+            webcam_frame = cv2.flip(webcam_frame, 1)
+            
+            # Resize webcam frame to specified size
+            webcam_frame = cv2.resize(webcam_frame, self.webcam_size)
+            
+            # Calculate position (bottom-right corner with padding)
+            padding = 20
+            frame_height, frame_width = frame.shape[:2]
+            x_offset = max(0, frame_width - self.webcam_size[0] - padding)
+            y_offset = max(0, frame_height - self.webcam_size[1] - padding)
+            
+            # Ensure we don't go out of bounds
+            x_end = min(frame_width, x_offset + self.webcam_size[0])
+            y_end = min(frame_height, y_offset + self.webcam_size[1])
+            
+            actual_width = x_end - x_offset
+            actual_height = y_end - y_offset
+            
+            if actual_width <= 0 or actual_height <= 0:
+                return frame, None
+            
+            # Only resize if needed
+            if (actual_width, actual_height) != self.webcam_size:
+                webcam_frame = cv2.resize(webcam_frame, (actual_width, actual_height))
+            
+            # Add border (red rectangle)
+            border_thickness = 3
+            border_color = (0, 0, 255)  # Red in BGR
+            cv2.rectangle(frame, 
+                         (x_offset - border_thickness, y_offset - border_thickness),
+                         (x_end + border_thickness, y_end + border_thickness),
+                         border_color, border_thickness)
+            
+            # Add "LIVE" text above webcam with background
+            live_text = "LIVE"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            font_thickness = 2
+            text_color = (255, 255, 255)  # White text
+            bg_color = (0, 0, 255)  # Red background
+            
+            text_size = cv2.getTextSize(live_text, font, font_scale, font_thickness)[0]
+            text_x = x_offset + (actual_width - text_size[0]) // 2
+            text_y = y_offset - 15
+            
+            if text_y > text_size[1]:
+                # Text background box
+                cv2.rectangle(frame,
+                             (text_x - 8, text_y - text_size[1] - 8),
+                             (text_x + text_size[0] + 8, text_y + 5),
+                             bg_color, -1)
+                # Text
+                cv2.putText(frame, live_text, (text_x, text_y), font, font_scale, text_color, font_thickness)
+            
+            # Overlay webcam frame onto the main frame
+            try:
+                frame[y_offset:y_end, x_offset:x_end] = webcam_frame
+            except ValueError as ve:
+                return frame, None
+            
+            # Return frame and webcam rectangle for blur exclusion
+            return frame, (x_offset, y_offset, actual_width, actual_height)
+            
+        except Exception as e:
+            print(f"Webcam overlay error: {e}")
+            return frame, None
+    
     def record_screen(self):
         """Record the screen in a separate thread"""
         try:
@@ -376,40 +519,59 @@ class ScreenRecorder(QMainWindow):
             
             self.out = cv2.VideoWriter(str(output_file), fourcc, fps, (width, height))
             
+            if not self.out.isOpened():
+                raise Exception("Failed to initialize video writer")
+            
             # Screen capture
             import mss
             sct = mss.mss()
             monitor = sct.monitors[1]
             
             frame_time = time.time()
+            consecutive_errors = 0
             
             while self.recording:
-                screenshot = sct.grab(monitor)
-                frame = np.array(screenshot)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                try:
+                    screenshot = sct.grab(monitor)
+                    frame = np.array(screenshot)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    
+                    if (frame.shape[1], frame.shape[0]) != (width, height):
+                        frame = cv2.resize(frame, (width, height))
+                    
+                    # Overlay webcam first (safe - returns original frame if webcam fails)
+                    frame, webcam_rect = self.overlay_webcam(frame)
+                    
+                    # Apply face blur (excluding webcam area)
+                    frame = self.apply_face_blur(frame, webcam_rect)
+                    
+                    with self.frame_lock:
+                        self.latest_frame = frame.copy()
+                    
+                    self.out.write(frame)
+                    self.frame_count += 1
+                    consecutive_errors = 0
+                    
+                    # Control frame rate
+                    elapsed = time.time() - frame_time
+                    sleep_time = frame_duration - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    frame_time = time.time()
                 
-                if (frame.shape[1], frame.shape[0]) != (width, height):
-                    frame = cv2.resize(frame, (width, height))
-                
-                frame = self.apply_face_blur(frame)
-                
-                with self.frame_lock:
-                    self.latest_frame = frame.copy()
-                
-                self.out.write(frame)
-                self.frame_count += 1
-                
-                # Control frame rate
-                elapsed = time.time() - frame_time
-                sleep_time = frame_duration - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                frame_time = time.time()
+                except Exception as frame_error:
+                    consecutive_errors += 1
+                    print(f"Frame capture error {consecutive_errors}: {frame_error}")
+                    if consecutive_errors > 10:
+                        raise Exception(f"Too many consecutive frame errors: {frame_error}")
+                    time.sleep(0.1)
             
             self.out.release()
             sct.close()
+            print("✅ Recording completed successfully")
             
         except Exception as e:
+            print(f"❌ Recording error: {str(e)}")
             self.recorder_signals.recording_error.emit(f"Recording error: {str(e)}")
     
     def stop_recording(self):
@@ -418,6 +580,11 @@ class ScreenRecorder(QMainWindow):
         self.timer.stop()
         self.preview_timer.stop()
         self.preview_signal_timer.stop()
+        
+        # Release webcam
+        if self.webcam is not None:
+            self.webcam.release()
+            self.webcam = None
         
         # Hide preview window
         self.preview_window.hide()
@@ -464,7 +631,13 @@ class ScreenRecorder(QMainWindow):
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             
-            frame = self.apply_face_blur(frame)
+            # Overlay webcam if recording or streaming
+            if self.recording or self.streaming:
+                frame, webcam_rect = self.overlay_webcam(frame)
+                frame = self.apply_face_blur(frame, webcam_rect)
+            else:
+                frame = self.apply_face_blur(frame)
+            
             self.preview_panel.update_preview(frame)
             
             sct.close()
@@ -495,10 +668,240 @@ class ScreenRecorder(QMainWindow):
         self.stop_recording()
         self.statusBar().showMessage(f"Error: {error_msg}")
     
+    def start_streaming(self):
+        """Start live streaming to RTMP server"""
+        # Ask user for stream key
+        stream_key, ok = QInputDialog.getText(
+            self,
+            "🔑 Stream Key Required",
+            "Enter your YouTube/RTMP Stream Key:",
+            text=""
+        )
+        
+        if not ok or not stream_key.strip():
+            self.statusBar().showMessage("❌ Stream key not provided")
+            return
+        
+        self.stream_key = stream_key.strip()
+        self.streaming = True
+        self.frame_count = 0
+        
+        # Initialize webcam (optional - continue if it fails)
+        if self.webcam_enabled:
+            try:
+                # Try to initialize webcam with proper settings
+                self.webcam = cv2.VideoCapture(0)
+                
+                # Give webcam time to initialize
+                time.sleep(0.5)
+                
+                if self.webcam and self.webcam.isOpened():
+                    self.webcam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    self.webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    self.webcam.set(cv2.CAP_PROP_FPS, 30)
+                    self.webcam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    
+                    # Test if webcam actually works
+                    ret, test_frame = self.webcam.read()
+                    if ret and test_frame is not None:
+                        print("✅ Webcam initialized successfully")
+                    else:
+                        print("⚠️  Webcam opened but not reading frames")
+                        self.webcam = None
+                else:
+                    print("⚠️  Webcam not available - streaming without webcam")
+                    self.webcam = None
+            except Exception as e:
+                print(f"⚠️  Failed to initialize webcam: {e}")
+                self.webcam = None
+        
+        # Update UI
+        self.control_buttons.set_streaming_state(True)
+        self.status_panel.update_status("📡 Streaming", 'recording')
+        self.settings_button.setEnabled(False)
+        
+        # Show preview window
+        self.preview_window.show()
+        
+        # Start timers
+        self.timer.start(100)
+        self.preview_timer.start(100)
+        self.preview_signal_timer.start(50)
+        
+        # Start streaming thread
+        self.streaming_thread = threading.Thread(target=self.stream_screen, daemon=True)
+        self.streaming_thread.start()
+        
+        self.recorder_signals.streaming_started.emit()
+        self.statusBar().showMessage("📡 Live streaming started!")
+    
+    def stream_screen(self):
+        """Stream the screen to RTMP server"""
+        try:
+            width, height = self.current_resolution
+            fps = self.current_fps
+            
+            # Use full path to FFmpeg
+            ffmpeg_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
+            
+            # FFmpeg command for streaming
+            ffmpeg_cmd = [
+                ffmpeg_path,
+                "-loglevel", "warning",
+                "-y",
+                
+                # Input 0: raw video from stdin
+                "-thread_queue_size", "512",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-s", f"{width}x{height}",
+                "-r", str(fps),
+                "-i", "-",  # stdin video stream
+                
+                # Input 1: silent audio
+                "-thread_queue_size", "512",
+                "-f", "lavfi", "-i", "anullsrc",
+                
+                # Output encoding
+                "-vf", "scale=1280:720",  # downscale to 720p
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-preset", "veryfast",
+                "-b:v", "4500k",
+                "-g", str(fps * 2),
+                "-c:a", "aac",
+                "-ar", "44100",
+                "-b:a", "128k",
+                "-f", "flv",
+                f"{self.rtmp_url}{self.stream_key}"
+            ]
+            
+            # Start FFmpeg process
+            self.ffmpeg_process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            print("🚀 Streaming started...")
+            
+            # Screen capture for streaming
+            import mss
+            sct = mss.mss()
+            monitor = sct.monitors[1]
+            
+            frame_duration = 1.0 / fps
+            frame_time = time.time()
+            consecutive_errors = 0
+            
+            while self.streaming:
+                try:
+                    # Capture screen
+                    screenshot = sct.grab(monitor)
+                    frame = np.array(screenshot)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    
+                    if (frame.shape[1], frame.shape[0]) != (width, height):
+                        frame = cv2.resize(frame, (width, height))
+                    
+                    # Overlay webcam
+                    frame, webcam_rect = self.overlay_webcam(frame)
+                    
+                    # Apply face blur (excluding webcam area)
+                    frame = self.apply_face_blur(frame, webcam_rect)
+                    
+                    with self.frame_lock:
+                        self.latest_frame = frame.copy()
+                    
+                    # Send to FFmpeg
+                    self.ffmpeg_process.stdin.write(frame.tobytes())
+                    self.ffmpeg_process.stdin.flush()
+                    
+                    self.frame_count += 1
+                    consecutive_errors = 0
+                    
+                    # Control frame rate
+                    elapsed = time.time() - frame_time
+                    sleep_time = frame_duration - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    frame_time = time.time()
+                
+                except BrokenPipeError:
+                    print("❌ FFmpeg pipe broken - connection lost")
+                    raise Exception("Stream connection lost")
+                except Exception as frame_error:
+                    consecutive_errors += 1
+                    print(f"Frame streaming error {consecutive_errors}: {frame_error}")
+                    if consecutive_errors > 10:
+                        raise Exception(f"Too many consecutive streaming errors: {frame_error}")
+                    time.sleep(0.1)
+            
+            sct.close()
+            if self.ffmpeg_process and self.ffmpeg_process.stdin:
+                self.ffmpeg_process.stdin.close()
+                self.ffmpeg_process.wait()
+            
+            print("✅ Streaming completed successfully")
+            
+        except Exception as e:
+            print(f"❌ Streaming error: {str(e)}")
+            self.recorder_signals.streaming_error.emit(f"Streaming error: {str(e)}")
+    
+    def stop_streaming(self):
+        """Stop live streaming"""
+        self.streaming = False
+        self.timer.stop()
+        self.preview_timer.stop()
+        self.preview_signal_timer.stop()
+        
+        # Release webcam
+        if self.webcam is not None:
+            self.webcam.release()
+            self.webcam = None
+        
+        # Stop FFmpeg process
+        if self.ffmpeg_process:
+            try:
+                if self.ffmpeg_process.stdin:
+                    self.ffmpeg_process.stdin.close()
+                self.ffmpeg_process.terminate()
+                self.ffmpeg_process.wait(timeout=5)
+            except:
+                try:
+                    self.ffmpeg_process.kill()
+                except:
+                    pass
+            self.ffmpeg_process = None
+        
+        # Hide preview window
+        self.preview_window.hide()
+        
+        # Update UI
+        self.control_buttons.set_streaming_state(False)
+        self.status_panel.update_status("✅ Stopped", 'stopped')
+        self.preview_panel.clear_preview()
+        self.settings_button.setEnabled(True)
+        
+        self.recorder_signals.streaming_stopped.emit()
+        self.statusBar().showMessage("📡 Live streaming stopped")
+    
     def closeEvent(self, event):
         """Handle window close"""
+        # Stop recording if active
         if self.recording:
             self.stop_recording()
+        
+        # Stop streaming if active
+        if self.streaming:
+            self.stop_streaming()
+        
+        # Release webcam if still active
+        if self.webcam is not None:
+            self.webcam.release()
+            self.webcam = None
+        
         self.timer.stop()
         self.preview_timer.stop()
         self.preview_signal_timer.stop()
