@@ -7,6 +7,13 @@ import re
 import pygetwindow as gw
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+from screeninfo import get_monitors
+
+# ---- DPI and pixel scaling ----
+width_mm = get_monitors()[0].width_mm
+width_px = get_monitors()[0].width
+DPI = width_px / (width_mm / 25.4)
+PX_PER_CM = DPI / 2.54
 
 # ---- Config ----
 MONITOR_INDEX = 1
@@ -15,19 +22,22 @@ BLUR_SIGMA = 30
 FACE_DETECT_EVERY = 2
 OCR_EVERY = 2
 SCALE = 0.5
-API_KEY_MIN_LEN = 16    # treat tokens >= this as potential keys
-API_KEY_PADDING = 24    # px padding around detected box
+API_KEY_MIN_LEN = 16
 
-# ---- Setup screen capture ----
+# real-world tuned thresholds
+MAX_HORIZONTAL_GAP = int(3 * PX_PER_CM)  # ~3 cm to right
+MAX_VERTICAL_GAP = int(2 * PX_PER_CM)    # ~2 cm below
+API_KEY_PADDING = int(0.7 * PX_PER_CM)   # ~0.7 cm blur margin
+
+# ---- Setup ----
 sct = mss.mss()
 monitor = sct.monitors[MONITOR_INDEX]
 
-# ---- Haar cascade (faces) ----
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 if face_cascade.empty():
     raise RuntimeError("Could not load Haar cascade")
 
-# ---- Presidio Analyzer (kept for other sensitive detection) ----
+# ---- Presidio ----
 config = {
     "nlp_engine_name": "spacy",
     "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
@@ -37,168 +47,106 @@ nlp_engine = provider.create_engine()
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
 SENSITIVE_TYPES = {
-    "EMAIL_ADDRESS",
-    "PHONE_NUMBER",
-    "CREDIT_CARD",
-    "IP_ADDRESS",
-    "US_SSN",
-    "IBAN_CODE",
-    "LOCATION",
-    "GPE",
-    "FAC",
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IP_ADDRESS",
+    "US_SSN", "IBAN_CODE", "LOCATION", "GPE", "FAC"
 }
 
-# regex to detect label tokens like "api_key", "api key", "api-key"
+# patterns
 api_label_re = re.compile(r'(api[_\-\s]?key|[a-z0-9\-_]*secret\b)', re.I)
+key_candidate_re = re.compile(r'^[A-Za-z0-9_\-]{16,}$')
 
-# --- GUI setup ---
+# ---- GUI ----
 cv2.namedWindow("Screen (API-key Blur)", cv2.WINDOW_NORMAL)
 cv2.resizeWindow("Screen (API-key Blur)", 960, 540)
 
-faces_cache = []
-sensitive_boxes = []  # cache for sensitive text bounding boxes
-api_blur_boxes = []   # cache for api-key-related blur boxes
-frame_idx = 0
-t_prev = time.time()
-fps = 0.0
+faces_cache, sensitive_boxes, api_blur_boxes = [], [], []
+frame_idx, t_prev, fps = 0, time.time(), 0.0
 
 while True:
     frame_idx += 1
     img = np.array(sct.grab(monitor))
     frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
-    # ---- Check active window for sensitive files (keep existing behavior) ----
-    blur_entire_screen = False
+    # ---- check sensitive window ----
+    blur_entire = False
     try:
-        active_window = gw.getActiveWindow()
-        if active_window:
-            title = active_window.title.lower()
-            # check keywords for sensitive files - keep this list if you were using earlier
-            if any(k in title for k in [".env", "secrets", "config", "apikey", ".pem", ".key"]):
-                blur_entire_screen = True
+        win = gw.getActiveWindow()
+        if win and any(k in win.title.lower() for k in [".env", "secrets", "config", "apikey", ".pem", ".key"]):
+            blur_entire = True
     except Exception:
         pass
 
-    if blur_entire_screen:
-        # full-screen blur when a sensitive file is open
+    if blur_entire:
         frame = cv2.GaussianBlur(frame, (101, 101), 45)
-        # show and skip further detection
     else:
-        # ---- face detection (periodic) ----
+        # ---- faces ----
         if frame_idx % FACE_DETECT_EVERY == 0:
             small = cv2.resize(frame, None, fx=SCALE, fy=SCALE)
             gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
             det = face_cascade.detectMultiScale(gray_small, 1.1, 5, minSize=(24, 24))
             faces_cache = [(int(x/SCALE), int(y/SCALE), int(w/SCALE), int(h/SCALE)) for (x, y, w, h) in det]
-
-        # ---- blur faces ----
         for (x, y, w, h) in faces_cache:
             roi = frame[y:y+h, x:x+w]
             if roi.size:
                 frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, BLUR_KSIZE, BLUR_SIGMA)
 
-        # ---- OCR + sensitive detection (periodic) ----
+        # ---- OCR detection ----
         if frame_idx % OCR_EVERY == 0:
             api_blur_boxes.clear()
             sensitive_boxes.clear()
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # run tesseract word-level
             data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
             n = len(data["text"])
+            words = [(data["text"][i].strip(),
+                      (data["left"][i], data["top"][i], data["width"][i], data["height"][i]))
+                     for i in range(n) if data["text"][i].strip()]
 
-            # build a list of OCR words with their boxes to allow looking ahead
-            words = []
-            for i in range(n):
-                wtext = data["text"][i].strip()
-                if not wtext:
-                    words.append(("", None))
+            for i, (label, lb) in enumerate(words):
+                if not api_label_re.search(label):
                     continue
-                bbox = (data["left"][i], data["top"][i], data["width"][i], data["height"][i])
-                words.append((wtext, bbox))
+                lx, ly, lw, lh = lb
+                lcx = lx + lw // 2
+                lcy = ly + lh // 2
 
-            # scan OCR words for api label or clipboard token or other sensitive types via Presidio
-            for i, (wtext, bbox) in enumerate(words):
-                if not wtext or bbox is None:
-                    continue
+                for j, (cand, cb) in enumerate(words):
+                    if i == j or not key_candidate_re.match(cand):
+                        continue
+                    cx, cy, cw, ch = cb
+                    ccx = cx + cw // 2
+                    ccy = cy + ch // 2
 
-                # 1) If the word is an API label like "api_key"
-                if api_label_re.search(wtext):
-                    # look at next 1-2 words for actual key token
-                    candidate_boxes = [bbox]  # include label box
-                    key_found = False
-                    for j in (i+1, i+2):
-                        if j < len(words):
-                            nxt_text, nxt_bbox = words[j]
-                            if nxt_text and nxt_bbox:
-                                # if the next token looks like a key, include it
-                                if looks_like_key(nxt_text):
-                                    candidate_boxes.append(nxt_bbox)
-                                    key_found = True
-                                    break
-                                # also include if next token is punctuation followed by token
-                                # include as candidate even if not key-looking (cover edge cases)
-                                candidate_boxes.append(nxt_bbox)
-                    # union the candidate boxes and add padding
-                    if candidate_boxes:
-                        xs = [b[0] for b in candidate_boxes]
-                        ys = [b[1] for b in candidate_boxes]
-                        ws = [b[2] for b in candidate_boxes]
-                        hs = [b[3] for b in candidate_boxes]
-                        x_min = min(xs)
-                        y_min = min(ys)
-                        x_max = max([xs[k] + ws[k] for k in range(len(ws))])
-                        y_max = max([ys[k] + hs[k] for k in range(len(hs))])
-                        # pad
-                        x_min = max(0, x_min - API_KEY_PADDING)
-                        y_min = max(0, y_min - API_KEY_PADDING)
-                        x_max = min(frame.shape[1], x_max + API_KEY_PADDING)
-                        y_max = min(frame.shape[0], y_max + API_KEY_PADDING)
-                        api_blur_boxes.append((x_min, y_min, x_max - x_min, y_max - y_min))
-
-                # 3) continue standard Presidio detection for other sensitive types and keep boxes
-                # (e.g., email, phones, etc.) - optional, kept minimal here for performance
-                # you can uncomment the following if you want to also collect other sensitive boxes:
-                results = analyzer.analyze(text=wtext, language="en")
+                    horiz_gap = cx - (lx + lw)
+                    vert_gap = cy - (ly + lh)
+                    if (0 < horiz_gap < MAX_HORIZONTAL_GAP and abs(ccy - lcy) < lh) or \
+                       (0 < vert_gap < MAX_VERTICAL_GAP and abs(ccx - lcx) < lw):
+                        x1 = max(0, min(lx, cx) - API_KEY_PADDING)
+                        y1 = max(0, min(ly, cy) - API_KEY_PADDING)
+                        x2 = min(frame.shape[1], max(lx+lw, cx+cw) + API_KEY_PADDING)
+                        y2 = min(frame.shape[0], max(ly+lh, cy+ch) + API_KEY_PADDING)
+                        api_blur_boxes.append((x1, y1, x2-x1, y2-y1))
+                        break
+                        
+                # optional Presidio
+                results = analyzer.analyze(text=label, language="en")
                 results = [r for r in results if r.entity_type in SENSITIVE_TYPES]
                 if results:
-                    x, y, w, h = bbox
-                    sensitive_boxes.append((x, y, w, h))
+                    sensitive_boxes.append(lb)
 
-            # deduplicate and merge overlapping api_blur_boxes
-            merged = []
-            for box in api_blur_boxes:
-                x, y, w, h = box
-                merged_flag = False
-                for idx, mb in enumerate(merged):
-                    mx, my, mw, mh = mb
-                    # overlap check
-                    if not (x + w < mx or mx + mw < x or y + h < my or my + mh < y):
-                        # merge
-                        nx = min(x, mx); ny = min(y, my)
-                        nx2 = max(x + w, mx + mw); ny2 = max(y + h, my + mh)
-                        merged[idx] = (nx, ny, nx2 - nx, ny2 - ny)
-                        merged_flag = True
-                        break
-                if not merged_flag:
-                    merged.append(box)
-            api_blur_boxes = merged
-
-        # ---- Reapply blur for all cached sensitive boxes (other sensitive_boxes kept for older logic) ----
-        for (x, y, w, h) in sensitive_boxes + api_blur_boxes:
+        # ---- blur boxes ----
+        for (x, y, w, h) in api_blur_boxes + sensitive_boxes:
             roi = frame[y:y+h, x:x+w]
             if roi.size:
                 frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, BLUR_KSIZE, BLUR_SIGMA)
-                # optional: draw rectangle briefly for debug (comment out in production)
+                # debug
                 # cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,255), 2)
 
-    # ---- FPS overlay ----
+    # ---- FPS ----
     now = time.time()
     fps = 0.9 * fps + 0.1 * (1.0 / (now - t_prev))
     t_prev = now
     cv2.putText(frame, f"FPS: {fps:0.1f}", (12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 220, 20), 2)
 
-    # ---- Show frame ----
     cv2.imshow("Screen (API-key Blur)", frame)
     if cv2.waitKey(1) & 0xFF == 27:
         break
