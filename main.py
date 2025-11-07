@@ -19,8 +19,8 @@ PX_PER_CM = DPI / 2.54
 MONITOR_INDEX = 1
 BLUR_KSIZE = (51, 51)
 BLUR_SIGMA = 30
-FACE_DETECT_EVERY = 2
-OCR_EVERY = 2
+FACE_DETECT_EVERY = 1
+OCR_EVERY = 1
 SCALE = 0.5
 API_KEY_MIN_LEN = 16
 
@@ -66,6 +66,8 @@ while True:
     frame_idx += 1
     img = np.array(sct.grab(monitor))
     frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    
+    starttime = time.time()
 
     # ---- check sensitive window ----
     blur_entire = False
@@ -131,7 +133,6 @@ while True:
                 results = [r for r in results if r.entity_type in SENSITIVE_TYPES]
                 if results:
                     sensitive_boxes.append(lb)
-
         # ---- blur boxes ----
         for (x, y, w, h) in api_blur_boxes + sensitive_boxes:
             roi = frame[y:y+h, x:x+w]
@@ -139,6 +140,7 @@ while True:
                 frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, BLUR_KSIZE, BLUR_SIGMA)
                 # debug
                 # cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,255), 2)
+    print(f"total time:,{time.time()-starttime} for frame {frame_idx}")
 
     # ---- FPS ----
     now = time.time()
