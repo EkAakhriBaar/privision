@@ -1040,7 +1040,7 @@ class ScreenRecorder(QMainWindow):
             # FFmpeg command for streaming
             ffmpeg_cmd = [
                 "ffmpeg",
-                "-loglevel", "warning",
+                "-loglevel", "error",
                 "-y",
                 
                 # Input 0: raw video from stdin
@@ -1053,7 +1053,7 @@ class ScreenRecorder(QMainWindow):
                 
                 # Input 1: silent audio
                 "-thread_queue_size", "512",
-                "-f", "lavfi", "-i", "anullsrc",
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 
                 # Output encoding
                 "-vf", "scale=1280:720",  # downscale to 720p
@@ -1064,26 +1064,42 @@ class ScreenRecorder(QMainWindow):
                 "-maxrate", video_bitrate,
                 "-bufsize", "9000k",
                 "-g", str(fps * 2),
+                "-keyint_min", str(fps),
                 "-c:a", "aac",
                 "-ar", "44100",
                 "-b:a", "128k",
-                "-progress", "-",  # write progress info to stdout
-                "-stats_period", "1",
-
                 "-f", output_format,
                 f"{rtmp_url}{self.stream_key}"
             ]
             
             # Start FFmpeg process
+            print(f"🚀 Starting stream to {self.streaming_platform}...")
+            print(f"📡 RTMP URL: {rtmp_url}")
+            
             self.ffmpeg_process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                bufsize=10**8
             )
             
+            # Start a thread to monitor FFmpeg errors
+            def monitor_ffmpeg_errors():
+                while self.streaming and self.ffmpeg_process:
+                    try:
+                        line = self.ffmpeg_process.stderr.readline()
+                        if line:
+                            error_msg = line.decode('utf-8', errors='ignore').strip()
+                            if error_msg:
+                                print(f"[FFmpeg] {error_msg}")
+                    except:
+                        break
+            
+            error_thread = threading.Thread(target=monitor_ffmpeg_errors, daemon=True)
+            error_thread.start()
+            
             print("🚀 Streaming started...")
-
             
             # Screen capture for streaming
             import mss
@@ -1095,13 +1111,6 @@ class ScreenRecorder(QMainWindow):
             consecutive_errors = 0
             
             while self.streaming:
-                line = self.ffmpeg_process.stdout.readline()
-                print(line)
-                if not line:
-                    break
-                if "frame=" in line or "out_time_ms" in line:
-                    print("[FFmpeg]", line.strip())
-
                 try:
                     # Capture screen
                     screenshot = sct.grab(monitor)
