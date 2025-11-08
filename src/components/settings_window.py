@@ -275,6 +275,41 @@ class SettingsWindow(QDialog):
         blur_group.setLayout(blur_layout)
         layout.addWidget(blur_group)
         
+        # Sensitive content blur group
+        sensitive_group = QGroupBox("Sensitive Content Protection")
+        sensitive_group.setFont(QFont(FONTS['family_primary'], 14, QFont.Bold))
+        sensitive_group.setStyleSheet(f"""
+            QGroupBox {{
+                color: {COLORS['text_primary']};
+                border: 2px solid {COLORS['border_primary']};
+                border-radius: {RADIUS['md']};
+                margin-top: 12px;
+                padding-top: 16px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 0 8px;
+            }}
+        """)
+        sensitive_layout = QVBoxLayout()
+        sensitive_layout.setSpacing(16)
+        
+        self.sensitive_blur_checkbox = QCheckBox("Enable sensitive content blurring")
+        self.sensitive_blur_checkbox.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        self.sensitive_blur_checkbox.setStyleSheet(get_checkbox_style())
+        self.sensitive_blur_checkbox.setChecked(False)
+        
+        sensitive_desc = QLabel("Automatically detects and blurs email addresses, phone numbers, API keys, credit cards, and other sensitive information")
+        sensitive_desc.setFont(QFont(FONTS['family_primary'], 11))
+        sensitive_desc.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
+        sensitive_desc.setWordWrap(True)
+        
+        sensitive_layout.addWidget(self.sensitive_blur_checkbox)
+        sensitive_layout.addWidget(sensitive_desc)
+        sensitive_group.setLayout(sensitive_layout)
+        layout.addWidget(sensitive_group)
+        
         layout.addStretch()
         widget.setLayout(layout)
         return widget
@@ -376,3 +411,7 @@ class SettingsWindow(QDialog):
     def is_blur_enabled(self):
         """Check if blur is enabled"""
         return self.blur_checkbox.isChecked()
+    
+    def is_sensitive_content_blur_enabled(self):
+        """Check if sensitive content blur is enabled"""
+        return self.sensitive_blur_checkbox.isChecked()

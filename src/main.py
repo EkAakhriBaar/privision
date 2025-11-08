@@ -25,6 +25,7 @@ from components import (
 from components.settings_window import SettingsWindow
 from components.video_gallery import VideoGallery
 from styles.modern_styles import get_main_window_style, COLORS, SPACING, FONTS
+from core.confidential_detector import ConfidentialDataDetector
 
 
 class RecorderSignals(QObject):
@@ -121,6 +122,16 @@ class ScreenRecorder(QMainWindow):
         self.BLUR_KSIZE = (51, 51)
         self.BLUR_SIGMA = 30
         self.DETECT_EVERY = 2
+        
+        # Confidential data detection setup
+        self.confidential_detector = ConfidentialDataDetector(padding_px=20)
+        self.sensitive_blur_enabled = False
+        self.confidential_blur_regions = []
+        self.ocr_frame_idx = 0
+        self.OCR_DETECT_EVERY = 45  # Run OCR every 45 frames (~1.5 seconds at 30fps) for performance
+        self.ocr_lock = threading.Lock()
+        self.ocr_thread_running = False
+        self.pending_ocr_frame = None
         
         # Live preview window
         self.preview_window = LivePreviewWindow()
@@ -315,6 +326,7 @@ class ScreenRecorder(QMainWindow):
             self.settings_window.resolution_combo.setCurrentText(f"{self.current_resolution[0]}x{self.current_resolution[1]} (Full HD)")
             self.settings_window.fps_spinbox.setValue(self.current_fps)
             self.settings_window.blur_checkbox.setChecked(self.blur_enabled)
+            self.settings_window.sensitive_blur_checkbox.setChecked(self.sensitive_blur_enabled)
         
         self.settings_window.exec_()
     
@@ -324,7 +336,12 @@ class ScreenRecorder(QMainWindow):
             self.current_resolution = self.settings_window.get_resolution()
             self.current_fps = self.settings_window.get_fps()
             self.blur_enabled = self.settings_window.is_blur_enabled()
-            self.statusBar().showMessage("✅ Settings saved successfully!")
+            self.sensitive_blur_enabled = self.settings_window.is_sensitive_content_blur_enabled()
+            
+            status_msg = "✅ Settings saved successfully!"
+            if self.sensitive_blur_enabled:
+                status_msg += " | 🔒 Sensitive data blur enabled"
+            self.statusBar().showMessage(status_msg)
     
     def apply_face_blur(self, frame, webcam_rect=None):
         """Detect faces and blur them (excluding webcam area)"""
@@ -358,6 +375,52 @@ class ScreenRecorder(QMainWindow):
             roi = frame[y1:y2, x1:x2]
             if roi.size > 0:
                 frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, self.BLUR_KSIZE, self.BLUR_SIGMA)
+        
+        return frame
+    
+    def _ocr_worker_thread(self, frame_copy):
+        """Background OCR processing thread - non-blocking"""
+        try:
+            detected_regions = self.confidential_detector.detect_confidential_data(frame_copy)
+            with self.ocr_lock:
+                self.confidential_blur_regions = detected_regions
+                self.ocr_thread_running = False
+        except Exception as e:
+            print(f"[OCR Error] {e}")
+            with self.ocr_lock:
+                self.ocr_thread_running = False
+    
+    def apply_confidential_data_blur(self, frame):
+        """Detect and blur confidential data like API keys, passwords, emails, etc. (Async OCR)"""
+        if not self.sensitive_blur_enabled:
+            return frame
+        
+        self.ocr_frame_idx += 1
+        
+        # Start OCR detection in background thread (non-blocking, only if not already running)
+        if self.ocr_frame_idx % self.OCR_DETECT_EVERY == 0:
+            with self.ocr_lock:
+                if not self.ocr_thread_running:
+                    self.ocr_thread_running = True
+                    # Run OCR in background thread to avoid blocking
+                    ocr_thread = threading.Thread(
+                        target=self._ocr_worker_thread,
+                        args=(frame.copy(),),
+                        daemon=True
+                    )
+                    ocr_thread.start()
+        
+        # Apply blur to cached regions (instant, non-blocking)
+        with self.ocr_lock:
+            current_regions = self.confidential_blur_regions.copy() if self.confidential_blur_regions else []
+        
+        if current_regions:
+            frame = self.confidential_detector.apply_blur_to_frame(
+                frame, 
+                current_regions,
+                blur_ksize=(35, 35),
+                blur_sigma=25
+            )
         
         return frame
     
@@ -544,6 +607,9 @@ class ScreenRecorder(QMainWindow):
                     
                     # Apply face blur (excluding webcam area)
                     frame = self.apply_face_blur(frame, webcam_rect)
+                    
+                    # Apply confidential data blur if enabled
+                    frame = self.apply_confidential_data_blur(frame)
                     
                     with self.frame_lock:
                         self.latest_frame = frame.copy()
@@ -810,6 +876,9 @@ class ScreenRecorder(QMainWindow):
                     
                     # Apply face blur (excluding webcam area)
                     frame = self.apply_face_blur(frame, webcam_rect)
+                    
+                    # Apply confidential data blur if enabled
+                    frame = self.apply_confidential_data_blur(frame)
                     
                     with self.frame_lock:
                         self.latest_frame = frame.copy()

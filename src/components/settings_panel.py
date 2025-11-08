@@ -15,6 +15,7 @@ from styles.modern_styles import (
 
 class SettingsPanel(QFrame):
     blur_toggled = pyqtSignal(bool)
+    sensitive_content_blur_toggled = pyqtSignal(bool)
     
     def __init__(self):
         super().__init__()
@@ -101,6 +102,36 @@ class SettingsPanel(QFrame):
         blur_frame.setLayout(blur_layout)
         layout.addWidget(blur_frame)
         
+        # Sensitive content blur option
+        sensitive_frame = QFrame()
+        sensitive_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['bg_secondary']};
+                border: 2px solid {COLORS['primary']};
+                border-radius: 8px;
+                padding: 16px;
+            }}
+        """)
+        sensitive_layout = QVBoxLayout()
+        sensitive_layout.setContentsMargins(0, 0, 0, 0)
+        sensitive_layout.setSpacing(8)
+        
+        self.sensitive_blur_checkbox = QCheckBox("Blur Sensitive Content")
+        self.sensitive_blur_checkbox.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        self.sensitive_blur_checkbox.setStyleSheet(get_checkbox_style())
+        self.sensitive_blur_checkbox.setChecked(False)
+        self.sensitive_blur_checkbox.stateChanged.connect(lambda: self.sensitive_content_blur_toggled.emit(self.sensitive_blur_checkbox.isChecked()))
+        
+        sensitive_desc = QLabel("Automatically detects and blurs email, phone, API keys, credit cards, and other sensitive information")
+        sensitive_desc.setFont(QFont(FONTS['family_primary'], 10))
+        sensitive_desc.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
+        sensitive_desc.setWordWrap(True)
+        
+        sensitive_layout.addWidget(self.sensitive_blur_checkbox)
+        sensitive_layout.addWidget(sensitive_desc)
+        sensitive_frame.setLayout(sensitive_layout)
+        layout.addWidget(sensitive_frame)
+        
         layout.addStretch()
         self.setLayout(layout)
     
@@ -140,8 +171,13 @@ class SettingsPanel(QFrame):
         """Check if blur is enabled"""
         return self.blur_checkbox.isChecked()
     
+    def is_sensitive_content_blur_enabled(self):
+        """Check if sensitive content blur is enabled"""
+        return self.sensitive_blur_checkbox.isChecked()
+    
     def set_enabled(self, enabled):
         """Enable/disable all controls"""
         self.resolution_combo.setEnabled(enabled)
         self.fps_spinbox.setEnabled(enabled)
         self.blur_checkbox.setEnabled(enabled)
+        self.sensitive_blur_checkbox.setEnabled(enabled)

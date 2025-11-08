@@ -159,5 +159,4 @@ For issues or feature requests, please refer to the documentation or contact the
 
 ---
 
-**Enjoy your professional screen recording application with privacy protection!** 🎬🔒
-
+**Enjoy your professional screen recording application with privacy protection!*
