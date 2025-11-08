@@ -51,6 +51,4 @@ recordings/
 *.mkv
 *.flv
 
-src/__pycache__/
 
-API_KEY_GOOGLE_KEY = 4667fe5ef5e5w54wu56w5
