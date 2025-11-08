@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import re
 import pytesseract
+import time
 from typing import List, Tuple, Set
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
@@ -17,7 +18,8 @@ class ConfidentialDataDetector:
     def __init__(self, padding_px=20):
         self.padding_px = padding_px
         self.blur_regions_cache = []
-        self.frame_count = 0
+        self.last_detect_time = 0.0
+        self.cache_ttl_sec = 1.2  # Keep last boxes briefly to prevent flicker
         
         # Initialize Presidio
         try:
@@ -66,12 +68,28 @@ class ConfidentialDataDetector:
         """
         Detect confidential data using OCR + Presidio
         Returns list of (x, y, width, height) tuples for regions to blur
+        
+        PERFORMANCE OPTIMIZATION: Downscales frame for OCR, then scales coordinates back
         """
         self.frame_count += 1
         
         try:
+            # ===== DOWNSCALE FOR PERFORMANCE =====
+            # OCR on full 1920x1080 is VERY slow (~300ms)
+            # Downscaling to 640x360 makes it 10x faster (~30ms)
+            orig_height, orig_width = frame.shape[:2]
+            target_width = 640
+            scale_factor = target_width / orig_width
+            target_height = int(orig_height * scale_factor)
+            
+            # Downscale frame for OCR
+            small_frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+            
             # Convert to grayscale for OCR
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+            
+            # Slight denoise to improve OCR accuracy on UI text
+            gray = cv2.bilateralFilter(gray, d=7, sigmaColor=75, sigmaSpace=75)
             
             # Fast OCR
             data = pytesseract.image_to_data(
@@ -85,16 +103,22 @@ class ConfidentialDataDetector:
             temp_api_blur = []
             blurred_words = set()
             
-            # Extract words with positions
+            # Extract words with positions (with confidence filtering)
             words_list = []
             for i in range(n):
                 text = data["text"][i].strip()
-                if text and len(text) > 1:
+                # Confidence filtering: only accept text with conf >= 60
+                try:
+                    conf = float(data.get("conf", ["-1"])[i])
+                except (ValueError, IndexError, TypeError):
+                    conf = -1.0
+                
+                if text and len(text) > 1 and conf >= 60.0:
                     box = (data["left"][i], data["top"][i], data["width"][i], data["height"][i])
-                    words_list.append((text, box, i))
+                    words_list.append((text, box, i, conf))
             
             # ===== PASS 1: Detect API/secret labels and values =====
-            for i, (text, box, idx) in enumerate(words_list):
+            for i, (text, box, idx, conf) in enumerate(words_list):
                 if idx in blurred_words:
                     continue
                 
@@ -106,12 +130,12 @@ class ConfidentialDataDetector:
                     for j in range(i + 1, min(i + 6, len(words_list))):
                         if j >= len(words_list):
                             break
-                        next_text, next_box, next_idx = words_list[j]
+                        next_text, next_box, next_idx, next_conf = words_list[j]
                         if next_idx in blurred_words:
                             continue
                         
-                        # Value should be substantial
-                        if len(next_text) >= 6:
+                        # Value should be substantial and confident
+                        if len(next_text) >= 6 and next_conf >= 60.0:
                             cx, cy, cw, ch = next_box
                             vert_dist = cy - (ly + lh)
                             
@@ -129,8 +153,8 @@ class ConfidentialDataDetector:
             
             # ===== PASS 2: Presidio for sensitive data =====
             if self.presidio_enabled and self.analyzer:
-                for text, box, idx in words_list:
-                    if idx in blurred_words or len(text) < 3:
+                for text, box, idx, conf in words_list:
+                    if idx in blurred_words or len(text) < 3 or conf < 60.0:
                         continue
                     
                     # Skip common words
@@ -153,21 +177,125 @@ class ConfidentialDataDetector:
             
             # Combine all blur regions
             all_regions = temp_api_blur + temp_sensitive
-            self.blur_regions_cache = all_regions
-            return all_regions
+            
+            # Merge overlapping/nearby boxes to reduce jitter and cover full tokens
+            all_regions = self._merge_overlapping_boxes(all_regions, iou_threshold=0.2, expand_px=6)
+            
+            # ===== SCALE COORDINATES BACK TO ORIGINAL RESOLUTION =====
+            # Since we downscaled the frame for OCR, we MUST scale coordinates back
+            # This ensures blur is applied at the CORRECT LOCATION on the full-res frame
+            scaled_regions = []
+            for (x, y, w, h) in all_regions:
+                # Scale coordinates back to original frame size
+                scaled_x = int(x / scale_factor)
+                scaled_y = int(y / scale_factor)
+                scaled_w = int(w / scale_factor)
+                scaled_h = int(h / scale_factor)
+                scaled_regions.append((scaled_x, scaled_y, scaled_w, scaled_h))
+            
+            # Merge again after scaling to ensure clean boxes
+            scaled_regions = self._merge_overlapping_boxes(scaled_regions, iou_threshold=0.2, expand_px=8)
+            
+            self.blur_regions_cache = scaled_regions
+            self.last_detect_time = time.time()
+            print(f"🔍 [OCR] Regions: {len(scaled_regions)} | scale {1/scale_factor:.2f}x")
+            return scaled_regions
             
         except Exception as e:
             print(f"[OCR Error] {e}")
-            return self.blur_regions_cache
+            # Return cached if still fresh to avoid flicker
+            if time.time() - self.last_detect_time <= self.cache_ttl_sec:
+                return self.blur_regions_cache
+            return []
     
     def apply_blur_to_frame(self, frame: np.ndarray, blur_regions: List[Tuple[int, int, int, int]], 
                            blur_ksize=(35, 35), blur_sigma=25) -> np.ndarray:
-        """Apply Gaussian blur to specified regions"""
+        """Apply Gaussian blur to specified regions
+        
+        Args:
+            frame: Full resolution frame (e.g., 1920x1080)
+            blur_regions: List of (x, y, width, height) tuples in FULL RESOLUTION coordinates
+            blur_ksize: Gaussian blur kernel size
+            blur_sigma: Gaussian blur sigma
+        
+        Returns:
+            Frame with blur applied at correct locations
+        """
+        frame_h, frame_w = frame.shape[:2]
+        
         for (x, y, w, h) in blur_regions:
+            # Clamp coordinates to frame boundaries
             x1, y1 = max(0, x), max(0, y)
-            x2, y2 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
+            x2, y2 = min(frame_w, x + w), min(frame_h, y + h)
+            
+            # Apply blur if region is valid
             if x2 > x1 and y2 > y1:
-                frame[y1:y2, x1:x2] = cv2.GaussianBlur(
-                    frame[y1:y2, x1:x2], blur_ksize, blur_sigma
-                )
+                roi = frame[y1:y2, x1:x2]
+                if roi.size > 0:
+                    frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, blur_ksize, blur_sigma)
+        
         return frame
+    
+    @staticmethod
+    def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+        """Calculate Intersection over Union for two boxes"""
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        ax2, ay2 = ax + aw, ay + ah
+        bx2, by2 = bx + bw, by + bh
+        inter_x1, inter_y1 = max(ax, bx), max(ay, by)
+        inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+        inter_w, inter_h = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        if inter_area == 0:
+            return 0.0
+        area_a = aw * ah
+        area_b = bw * bh
+        union = area_a + area_b - inter_area
+        return inter_area / max(union, 1)
+    
+    @staticmethod
+    def _expand_box(box: Tuple[int, int, int, int], px: int, max_w: int = None, max_h: int = None) -> Tuple[int, int, int, int]:
+        """Expand box by px pixels"""
+        x, y, w, h = box
+        x1 = max(0, x - px)
+        y1 = max(0, y - px)
+        x2 = x + w + px
+        y2 = y + h + px
+        if max_w is not None:
+            x2 = min(max_w, x2)
+        if max_h is not None:
+            y2 = min(max_h, y2)
+        return (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
+    
+    def _merge_overlapping_boxes(self, boxes: List[Tuple[int, int, int, int]], iou_threshold: float = 0.2, expand_px: int = 6) -> List[Tuple[int, int, int, int]]:
+        """Merge overlapping boxes to reduce jitter and cover complete text regions"""
+        if not boxes:
+            return []
+        
+        # Expand boxes slightly to fuse near neighbors
+        expanded = []
+        for b in boxes:
+            expanded.append(self._expand_box(b, expand_px))
+        boxes = expanded
+        
+        # Simple greedy merge by IoU
+        boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
+        result: List[Tuple[int, int, int, int]] = []
+        
+        for b in boxes:
+            merged_flag = False
+            for i, r in enumerate(result):
+                if self._iou(b, r) >= iou_threshold:
+                    # Merge into r (union)
+                    x1 = min(b[0], r[0])
+                    y1 = min(b[1], r[1])
+                    x2 = max(b[0] + b[2], r[0] + r[2])
+                    y2 = max(b[1] + b[3], r[1] + r[3])
+                    result[i] = (x1, y1, x2 - x1, y2 - y1)
+                    merged_flag = True
+                    break
+            if not merged_flag:
+                result.append(b)
+        
+        return result

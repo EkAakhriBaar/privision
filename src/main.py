@@ -20,7 +20,7 @@ import cv2
 # Import custom components
 from components import (
     HeaderComponent, SettingsPanel, StatusPanel,
-    PreviewPanel, ControlButtons
+    PreviewPanel, ControlButtons, VideoProcessingPanel
 )
 from components.settings_window import SettingsWindow
 from components.video_gallery import VideoGallery
@@ -289,11 +289,15 @@ class ScreenRecorder(QMainWindow):
         self.confidential_detector = ConfidentialDataDetector(padding_px=20)
         self.sensitive_blur_enabled = False
         self.confidential_blur_regions = []
-        self.ocr_frame_idx = 0
-        self.OCR_DETECT_EVERY = 45  # Run OCR every 45 frames (~1.5 seconds at 30fps) for performance
+        self.debug_show_boxes = True  # Show red rectangles around detected regions for debugging
+        
+        # OCR Background Thread Setup (continuous worker)
         self.ocr_lock = threading.Lock()
         self.ocr_thread_running = False
+        self.ocr_worker_thread = None
         self.pending_ocr_frame = None
+        self.ocr_process_interval = 0.35  # Process OCR every 0.35 seconds (faster refresh, lower latency)
+        self.last_ocr_submit_time = 0
         
         # Live preview window
         self.preview_window = LivePreviewWindow()
@@ -444,6 +448,13 @@ class ScreenRecorder(QMainWindow):
         
         content_layout.addLayout(middle_row)
         
+        # Video Processing Section
+        self.video_processing_panel = VideoProcessingPanel(
+            self.recordings_dir,
+            Path(__file__).parent.parent / "processed_recordings"
+        )
+        content_layout.addWidget(self.video_processing_panel)
+        
         # Bottom row - Video Gallery
         self.video_gallery = VideoGallery(self.recordings_dir)
         content_layout.addWidget(self.video_gallery)
@@ -540,43 +551,97 @@ class ScreenRecorder(QMainWindow):
         
         return frame
     
-    def _ocr_worker_thread(self, frame_copy):
-        """Background OCR processing thread - non-blocking"""
-        try:
-            detected_regions = self.confidential_detector.detect_confidential_data(frame_copy)
+    def _ocr_continuous_worker(self):
+        """Continuous background OCR worker thread - runs independently"""
+        print("🔄 [OCR Worker] Background thread started")
+        
+        while self.ocr_thread_running:
+            try:
+                # Check if there's a pending frame to process
+                with self.ocr_lock:
+                    if self.pending_ocr_frame is not None:
+                        frame_to_process = self.pending_ocr_frame.copy()
+                        self.pending_ocr_frame = None
+                    else:
+                        frame_to_process = None
+                
+                # If no frame, wait and continue
+                if frame_to_process is None:
+                    time.sleep(0.05)
+                    continue
+                
+                # Run OCR detection (this is slow but runs in background)
+                ocr_start = time.time()
+                detected_regions = self.confidential_detector.detect_confidential_data(frame_to_process)
+                ocr_time = time.time() - ocr_start
+                
+                # Update cached regions (thread-safe)
+                with self.ocr_lock:
+                    self.confidential_blur_regions = detected_regions
+                
+                print(f"🔍 [OCR] Processed in {ocr_time:.3f}s | Found {len(detected_regions)} sensitive regions")
+                
+            except Exception as e:
+                print(f"❌ [OCR Worker Error] {e}")
+                time.sleep(0.1)
+        
+        print("🛑 [OCR Worker] Background thread stopped")
+    
+    def start_ocr_worker(self):
+        """Start the continuous OCR background worker thread"""
+        if not self.ocr_thread_running:
+            self.ocr_thread_running = True
+            self.ocr_worker_thread = threading.Thread(target=self._ocr_continuous_worker, daemon=True)
+            self.ocr_worker_thread.start()
+            print("✅ [OCR Thread] Started successfully")
+    
+    def stop_ocr_worker(self):
+        """Stop the OCR background worker thread"""
+        if self.ocr_thread_running:
+            self.ocr_thread_running = False
+            if self.ocr_worker_thread:
+                self.ocr_worker_thread.join(timeout=2.0)
+            print("🛑 [OCR Thread] Stopped")
+    
+    def submit_frame_for_ocr(self, frame):
+        """Submit a frame to the background OCR thread for processing (non-blocking)"""
+        current_time = time.time()
+        
+        # Only submit every 0.5 seconds to avoid overloading
+        if current_time - self.last_ocr_submit_time >= self.ocr_process_interval:
             with self.ocr_lock:
-                self.confidential_blur_regions = detected_regions
-                self.ocr_thread_running = False
-        except Exception as e:
-            print(f"[OCR Error] {e}")
-            with self.ocr_lock:
-                self.ocr_thread_running = False
+                # Only update if background thread has finished processing previous frame
+                if self.pending_ocr_frame is None:
+                    self.pending_ocr_frame = frame.copy()
+                    self.last_ocr_submit_time = current_time
     
     def apply_confidential_data_blur(self, frame):
-        """Detect and blur confidential data like API keys, passwords, emails, etc. (Async OCR)"""
+        """Apply blur to confidential data using cached regions from background OCR thread
+        
+        This method is INSTANT - it only applies blur to pre-detected regions.
+        The actual OCR runs continuously in a background thread.
+        """
         if not self.sensitive_blur_enabled:
             return frame
         
-        self.ocr_frame_idx += 1
+        # Submit frame for background OCR processing (non-blocking, very fast)
+        self.submit_frame_for_ocr(frame)
         
-        # Start OCR detection in background thread (non-blocking, only if not already running)
-        if self.ocr_frame_idx % self.OCR_DETECT_EVERY == 0:
-            with self.ocr_lock:
-                if not self.ocr_thread_running:
-                    self.ocr_thread_running = True
-                    # Run OCR in background thread to avoid blocking
-                    ocr_thread = threading.Thread(
-                        target=self._ocr_worker_thread,
-                        args=(frame.copy(),),
-                        daemon=True
-                    )
-                    ocr_thread.start()
-        
-        # Apply blur to cached regions (instant, non-blocking)
+        # Apply blur to cached regions from background thread (INSTANT - no OCR here!)
         with self.ocr_lock:
             current_regions = self.confidential_blur_regions.copy() if self.confidential_blur_regions else []
         
+        # Apply blur if we have regions (fast Gaussian blur only)
         if current_regions:
+            # Debug: Draw rectangles around detected regions (RED BOXES)
+            if self.debug_show_boxes:
+                for (x, y, w, h) in current_regions:
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 3)
+                    # Add label
+                    cv2.putText(frame, "CONFIDENTIAL", (x, y - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Apply blur
             frame = self.confidential_detector.apply_blur_to_frame(
                 frame, 
                 current_regions,
@@ -592,6 +657,10 @@ class ScreenRecorder(QMainWindow):
         self.frame_count = 0
         self.detect_frame_idx = 0
         self.start_time = datetime.now()
+        
+        # Start OCR worker thread if sensitive blur is enabled
+        if self.sensitive_blur_enabled:
+            self.start_ocr_worker()
         
         # Initialize webcam (optional - continue if it fails)
         if self.webcam_enabled:
@@ -755,6 +824,11 @@ class ScreenRecorder(QMainWindow):
             frame_time = time.time()
             consecutive_errors = 0
             
+            # FPS tracking
+            fps_counter = 0
+            fps_start_time = time.time()
+            last_fps_log = time.time()
+            
             while self.recording:
                 try:
                     screenshot = sct.grab(monitor)
@@ -778,7 +852,19 @@ class ScreenRecorder(QMainWindow):
                     
                     self.out.write(frame)
                     self.frame_count += 1
+                    fps_counter += 1
                     consecutive_errors = 0
+                    
+                    # Log FPS every 2 seconds
+                    current_time = time.time()
+                    if current_time - last_fps_log >= 2.0:
+                        elapsed_fps = current_time - fps_start_time
+                        actual_fps = fps_counter / elapsed_fps if elapsed_fps > 0 else 0
+                        print(f"📹 [Recording] FPS: {actual_fps:.2f} | Frames: {self.frame_count} | Target: {fps} FPS")
+                        # Reset counters
+                        fps_counter = 0
+                        fps_start_time = current_time
+                        last_fps_log = current_time
                     
                     # Control frame rate
                     elapsed = time.time() - frame_time
@@ -796,6 +882,20 @@ class ScreenRecorder(QMainWindow):
             
             self.out.release()
             sct.close()
+            
+            # Final FPS statistics
+            if self.frame_count > 0:
+                total_time = time.time() - (fps_start_time - (fps_counter / max(actual_fps, 0.1)) if fps_counter > 0 else 0)
+                if total_time > 0:
+                    avg_fps = self.frame_count / total_time
+                    print(f"\n📊 ═══════════════════════════════════════")
+                    print(f"📹 Recording Statistics:")
+                    print(f"   • Total frames: {self.frame_count}")
+                    print(f"   • Average FPS: {avg_fps:.2f}")
+                    print(f"   • Target FPS: {fps}")
+                    print(f"   • Performance: {(avg_fps/fps*100):.1f}% of target")
+                    print(f"📊 ═══════════════════════════════════════\n")
+            
             print("✅ Recording completed successfully")
             
         except Exception as e:
@@ -808,6 +908,9 @@ class ScreenRecorder(QMainWindow):
         self.timer.stop()
         self.preview_timer.stop()
         self.preview_signal_timer.stop()
+        
+        # Stop OCR worker thread
+        self.stop_ocr_worker()
         
         # Release webcam
         if self.webcam is not None:
@@ -823,8 +926,9 @@ class ScreenRecorder(QMainWindow):
         self.preview_panel.clear_preview()
         self.settings_button.setEnabled(True)
         
-        # Refresh video gallery
+        # Refresh video gallery and processing panel
         self.video_gallery.load_videos()
+        self.video_processing_panel.load_videos()
         
         self.recorder_signals.recording_stopped.emit()
     
@@ -944,6 +1048,10 @@ class ScreenRecorder(QMainWindow):
             return
         self.streaming = True
         self.frame_count = 0
+        
+        # Start OCR worker thread if sensitive blur is enabled
+        if self.sensitive_blur_enabled:
+            self.start_ocr_worker()
         
         # Initialize webcam (optional - continue if it fails)
         if self.webcam_enabled:
@@ -1110,6 +1218,12 @@ class ScreenRecorder(QMainWindow):
             frame_time = time.time()
             consecutive_errors = 0
             
+            # FPS tracking
+            fps_counter = 0
+            fps_start_time = time.time()
+            last_fps_log = time.time()
+            actual_fps = 0.0
+            
             while self.streaming:
                 try:
                     # Capture screen
@@ -1137,7 +1251,19 @@ class ScreenRecorder(QMainWindow):
                     self.ffmpeg_process.stdin.flush()
                     
                     self.frame_count += 1
+                    fps_counter += 1
                     consecutive_errors = 0
+                    
+                    # Log FPS every 2 seconds
+                    current_time = time.time()
+                    if current_time - last_fps_log >= 2.0:
+                        elapsed_fps = current_time - fps_start_time
+                        actual_fps = fps_counter / elapsed_fps if elapsed_fps > 0 else 0
+                        print(f"📺 [Streaming] FPS: {actual_fps:.2f} | Frames sent: {self.frame_count} | Target: {fps} FPS")
+                        # Reset counters
+                        fps_counter = 0
+                        fps_start_time = current_time
+                        last_fps_log = current_time
                     
                     # Control frame rate
                     elapsed = time.time() - frame_time
@@ -1157,6 +1283,21 @@ class ScreenRecorder(QMainWindow):
                     time.sleep(0.1)
             
             sct.close()
+            
+            # Final FPS statistics
+            if self.frame_count > 0:
+                total_time = time.time() - (fps_start_time - (fps_counter / max(actual_fps, 0.1)) if fps_counter > 0 else 0)
+                if total_time > 0:
+                    avg_fps = self.frame_count / total_time
+                    print(f"\n📊 ═══════════════════════════════════════")
+                    print(f"📺 Streaming Statistics:")
+                    print(f"   • Total frames sent: {self.frame_count}")
+                    print(f"   • Average FPS: {avg_fps:.2f}")
+                    print(f"   • Target FPS: {fps}")
+                    print(f"   • Duration: {total_time:.1f} seconds")
+                    print(f"   • Performance: {(avg_fps/fps*100):.1f}% of target")
+                    print(f"📊 ═══════════════════════════════════════\n")
+            
             if self.ffmpeg_process and self.ffmpeg_process.stdin:
                 self.ffmpeg_process.stdin.close()
                 self.ffmpeg_process.wait()
@@ -1173,6 +1314,9 @@ class ScreenRecorder(QMainWindow):
         self.timer.stop()
         self.preview_timer.stop()
         self.preview_signal_timer.stop()
+        
+        # Stop OCR worker thread
+        self.stop_ocr_worker()
         
         # Release webcam
         if self.webcam is not None:
@@ -1214,6 +1358,9 @@ class ScreenRecorder(QMainWindow):
         # Stop streaming if active
         if self.streaming:
             self.stop_streaming()
+        
+        # Stop OCR worker thread if still running
+        self.stop_ocr_worker()
         
         # Release webcam if still active
         if self.webcam is not None:
