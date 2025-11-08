@@ -15,6 +15,8 @@ width_px = get_monitors()[0].width
 DPI = width_px / (width_mm / 25.4)
 PX_PER_CM = DPI / 2.54
 
+MIN_PRESIDIO_SCORE = 0.7
+
 # ---- Config ----
 MONITOR_INDEX = 1
 BLUR_KSIZE = (51, 51)
@@ -25,9 +27,9 @@ SCALE = 0.5
 API_KEY_MIN_LEN = 16
 
 # real-world tuned thresholds
-MAX_HORIZONTAL_GAP = int(7 * PX_PER_CM)  # ~3 cm to right
+MAX_HORIZONTAL_GAP = int(7 * PX_PER_CM)  # ~7 cm to right
 MAX_VERTICAL_GAP = int(2 * PX_PER_CM)    # ~2 cm below
-API_KEY_PADDING = int(0.4 * PX_PER_CM)   # ~0.7 cm blur margin
+API_KEY_PADDING = int(0.4 * PX_PER_CM)   # ~0.4 cm blur margin
 
 # ---- Setup ----
 sct = mss.mss()
@@ -47,17 +49,16 @@ nlp_engine = provider.create_engine()
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
 SENSITIVE_TYPES = {
-    "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IP_ADDRESS",
-    "US_SSN", "IBAN_CODE", "LOCATION", "GPE", "FAC"
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "IP_ADDRESS", "LOCATION", "US_SSN", "IBAN_CODE", "GPE", "FAC" 
 }
 
 # patterns
-api_label_re = re.compile(r'(api[_\-\s]?key|[a-z0-9\-_]*secret\b)', re.I)
+api_label_re = re.compile(r'\b(api[_\-\s]?key|[A-Za-z0-9\-_]*secret)\b', re.I)
 key_candidate_re = re.compile(r'^[A-Za-z0-9_\-]{16,}$')
 
 # ---- GUI ----
-cv2.namedWindow("Screen (API-key Blur)", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Screen (API-key Blur)", 960, 540)
+cv2.namedWindow("Screen", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Screen", 960, 540)
 
 faces_cache, sensitive_boxes, api_blur_boxes = [], [], []
 frame_idx, t_prev, fps = 0, time.time(), 0.0
@@ -102,12 +103,12 @@ while True:
             words = [(data["text"][i].strip(),
                       (data["left"][i], data["top"][i], data["width"][i], data["height"][i]))
                      for i in range(n) if data["text"][i].strip()]
-
             for i, (label, lb) in enumerate(words):
                 results = analyzer.analyze(text=label, language="en")
-                results = [r for r in results if r.entity_type in SENSITIVE_TYPES]
-                if results:
-                    sensitive_boxes.append(lb)
+                for r in results:
+                    if r.entity_type in SENSITIVE_TYPES and r.score >= MIN_PRESIDIO_SCORE:
+                        sensitive_boxes.append(lb)
+                        break
                 if not api_label_re.search(label):
                     continue
                 lx, ly, lw, lh = lb
@@ -140,7 +141,7 @@ while True:
                 frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, BLUR_KSIZE, BLUR_SIGMA)
                 # debug
                 # cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,255), 2)
-    print(f"total time:,{time.time()-starttime} for frame {frame_idx}")
+    # print(f"total time:,{time.time()-starttime} for frame {frame_idx}")
 
     # ---- FPS ----
     now = time.time()
@@ -149,7 +150,7 @@ while True:
     cv2.putText(frame, f"FPS: {fps:0.1f}", (12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 220, 20), 2)
 
-    cv2.imshow("Screen (API-key Blur)", frame)
+    cv2.imshow("Screen", frame)
     if cv2.waitKey(1) & 0xFF == 27:
         break
 
