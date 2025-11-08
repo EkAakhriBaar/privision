@@ -10,9 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QFrame, QPushButton, QLabel, QInputDialog
+    QScrollArea, QFrame, QPushButton, QLabel, QInputDialog, QDialog, QLineEdit
 )
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QPalette, QColor
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 import numpy as np
 import cv2
@@ -26,6 +26,161 @@ from components.settings_window import SettingsWindow
 from components.video_gallery import VideoGallery
 from styles.modern_styles import get_main_window_style, COLORS, SPACING, FONTS
 from core.confidential_detector import ConfidentialDataDetector
+
+
+class StyledStreamKeyDialog(QDialog):
+    """Custom styled dialog for stream key input"""
+    def __init__(self, parent, title, platform_icon, platform_name):
+        super().__init__(parent)
+        self.stream_key = None
+        self.setWindowTitle(title)
+        self.setFixedSize(600, 350)
+        self.setModal(True)
+        
+        # Set dark theme with better styling
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {COLORS['bg_primary']}, 
+                    stop:1 #0f1419);
+                border-radius: 12px;
+            }}
+            QLabel {{
+                color: white;
+                font-size: 14px;
+                padding: 5px;
+            }}
+            QLineEdit {{
+                background-color: #1a2332;
+                color: white;
+                border: 2px solid {COLORS['border_primary']};
+                border-radius: 8px;
+                padding: 12px 16px;
+                font-size: 14px;
+                font-family: 'Segoe UI', Arial;
+                selection-background-color: {COLORS['primary']};
+            }}
+            QLineEdit:focus {{
+                border: 2px solid {COLORS['primary']};
+                background-color: #1f2937;
+            }}
+            QPushButton {{
+                background-color: {COLORS['primary']};
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 14px 36px;
+                font-size: 15px;
+                font-weight: bold;
+                min-width: 140px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['primary_dark']};
+                transform: scale(1.02);
+            }}
+            QPushButton:pressed {{
+                background-color: #4338ca;
+            }}
+            QPushButton#cancelButton {{
+                background-color: #374151;
+            }}
+            QPushButton#cancelButton:hover {{
+                background-color: #4b5563;
+            }}
+            QPushButton#cancelButton:pressed {{
+                background-color: #1f2937;
+            }}
+        """)
+        
+        # Main layout
+        layout = QVBoxLayout()
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(25)
+        
+        # Title with icon
+        title_label = QLabel(f"{platform_icon}  {platform_name} Stream Key")
+        title_label.setFont(QFont(FONTS['family_primary'], 24, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("color: white; font-size: 26px; padding: 15px;")
+        layout.addWidget(title_label)
+        
+        # Instruction label
+        instruction_label = QLabel("Enter your stream key below:")
+        instruction_label.setFont(QFont(FONTS['family_primary'], 14))
+        instruction_label.setAlignment(Qt.AlignCenter)
+        instruction_label.setStyleSheet("color: #9ca3af; font-size: 15px; padding: 5px;")
+        layout.addWidget(instruction_label)
+        
+        # Stream key input
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("Paste your stream key here...")
+        self.key_input.setFont(QFont(FONTS['family_primary'], 13))
+        self.key_input.setEchoMode(QLineEdit.Password)
+        self.key_input.setMinimumHeight(50)
+        layout.addWidget(self.key_input)
+        
+        # Show/Hide key toggle
+        show_key_label = QLabel("💡 Tip: Your stream key will be hidden for security")
+        show_key_label.setFont(QFont(FONTS['family_primary'], 11))
+        show_key_label.setStyleSheet("color: #6b7280; font-size: 12px; padding: 5px;")
+        show_key_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(show_key_label)
+        
+        layout.addSpacing(10)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(20)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("cancelButton")
+        cancel_btn.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        cancel_btn.setMinimumHeight(50)
+        cancel_btn.setMinimumWidth(140)
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        
+        ok_btn = QPushButton("🚀 Start Stream")
+        ok_btn.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
+        ok_btn.setMinimumHeight(50)
+        ok_btn.setMinimumWidth(140)
+        ok_btn.clicked.connect(self.accept_key)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setDefault(True)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(cancel_btn)
+        button_layout.addWidget(ok_btn)
+        button_layout.addStretch()
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+        
+        # Focus on input
+        self.key_input.setFocus()
+    
+    def accept_key(self):
+        """Accept the stream key if not empty"""
+        key = self.key_input.text().strip()
+        if key:
+            self.stream_key = key
+            self.accept()
+        else:
+            self.key_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: #1a2332;
+                    color: white;
+                    border: 2px solid #ef4444;
+                    border-radius: 8px;
+                    padding: 12px 16px;
+                    font-size: 14px;
+                }
+            """)
+            self.key_input.setPlaceholderText("⚠️ Stream key is required!")
+    
+    def get_key(self):
+        """Return the entered stream key"""
+        return self.stream_key
 
 
 class RecorderSignals(QObject):
@@ -99,7 +254,14 @@ class ScreenRecorder(QMainWindow):
         self.streaming_thread = None
         self.ffmpeg_process = None
         self.stream_key = None
-        self.rtmp_url = "rtmp://a.rtmp.youtube.com/live2/"
+        self.streaming_platform = None
+        
+        # Platform RTMP URLs
+        self.rtmp_urls = {
+            'youtube': 'rtmp://a.rtmp.youtube.com/live2/',
+            'facebook': 'rtmps://live-api-s.facebook.com:443/rtmp/',
+            'twitch': 'rtmp://live.twitch.tv/app/'
+        }
         
         # Setup recordings directory
         self.recordings_dir = Path(__file__).parent.parent / "recordings"
@@ -276,7 +438,7 @@ class ScreenRecorder(QMainWindow):
         self.control_buttons = ControlButtons(self.recordings_dir)
         self.control_buttons.start_clicked.connect(self.start_recording)
         self.control_buttons.stop_clicked.connect(self.stop_recording)
-        self.control_buttons.stream_clicked.connect(self.start_streaming)
+        self.control_buttons.stream_clicked.connect(self.start_streaming)  # Now receives platform parameter
         self.control_buttons.stop_stream_clicked.connect(self.stop_streaming)
         middle_row.addWidget(self.control_buttons, 1)
         
@@ -734,21 +896,52 @@ class ScreenRecorder(QMainWindow):
         self.stop_recording()
         self.statusBar().showMessage(f"Error: {error_msg}")
     
-    def start_streaming(self):
+    def start_streaming(self, platform='youtube'):
         """Start live streaming to RTMP server"""
-        # Ask user for stream key
-        stream_key, ok = QInputDialog.getText(
-            self,
-            "🔑 Stream Key Required",
-            "Enter your YouTube/RTMP Stream Key:",
-            text=""
+        # Store the platform
+        self.streaming_platform = platform
+        
+        # Platform-specific info
+        platform_info = {
+            'youtube': {
+                'title': 'YouTube Live',
+                'icon': '📺',
+                'name': 'YouTube'
+            },
+            'facebook': {
+                'title': 'Facebook Live',
+                'icon': '📘',
+                'name': 'Facebook'
+            },
+            'twitch': {
+                'title': 'Twitch',
+                'icon': '🎮',
+                'name': 'Twitch'
+            }
+        }
+        
+        info = platform_info.get(platform, platform_info['youtube'])
+        
+        # Show custom styled dialog
+        dialog = StyledStreamKeyDialog(
+            self, 
+            info['title'],
+            info['icon'],
+            info['name']
         )
         
-        if not ok or not stream_key.strip():
-            self.statusBar().showMessage("❌ Stream key not provided")
-            return
+        result = dialog.exec_()
         
-        self.stream_key = stream_key.strip()
+        if result == QDialog.Accepted:
+            stream_key = dialog.get_key()
+            if stream_key:
+                self.stream_key = stream_key
+            else:
+                self.statusBar().showMessage(f"❌ {platform.capitalize()} stream key not provided")
+                return
+        else:
+            self.statusBar().showMessage(f"❌ Streaming cancelled")
+            return
         self.streaming = True
         self.frame_count = 0
         
@@ -781,9 +974,16 @@ class ScreenRecorder(QMainWindow):
                 print(f"⚠️  Failed to initialize webcam: {e}")
                 self.webcam = None
         
-        # Update UI
+        # Update UI with platform-specific icon
+        platform_icons = {
+            'youtube': '📺',
+            'facebook': '📘',
+            'twitch': '🎮'
+        }
+        icon = platform_icons.get(platform, '📡')
+        
         self.control_buttons.set_streaming_state(True)
-        self.status_panel.update_status("📡 Streaming", 'recording')
+        self.status_panel.update_status(f"{icon} Streaming to {platform.capitalize()}", 'recording')
         self.settings_button.setEnabled(False)
         
         # Show preview window
@@ -798,8 +998,16 @@ class ScreenRecorder(QMainWindow):
         self.streaming_thread = threading.Thread(target=self.stream_screen, daemon=True)
         self.streaming_thread.start()
         
+        # Platform-specific status messages
+        platform_icons = {
+            'youtube': '📺',
+            'facebook': '📘',
+            'twitch': '🎮'
+        }
+        icon = platform_icons.get(platform, '📡')
+        
         self.recorder_signals.streaming_started.emit()
-        self.statusBar().showMessage("📡 Live streaming started!")
+        self.statusBar().showMessage(f"{icon} Streaming to {platform.capitalize()}!")
     
     def stream_screen(self):
         """Stream the screen to RTMP server"""
@@ -807,8 +1015,27 @@ class ScreenRecorder(QMainWindow):
             width, height = self.current_resolution
             fps = self.current_fps
             
+            # Get RTMP URL for the selected platform
+            rtmp_url = self.rtmp_urls.get(self.streaming_platform, self.rtmp_urls['youtube'])
+            
             # Use full path to FFmpeg
             ffmpeg_path = r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe"
+            
+            # Platform-specific encoding settings
+            if self.streaming_platform == 'facebook':
+                # Facebook Live requires specific settings
+                output_format = "flv"
+                video_bitrate = "4500k"
+                preset = "veryfast"
+            elif self.streaming_platform == 'twitch':
+                # Twitch optimized settings
+                output_format = "flv"
+                video_bitrate = "6000k"
+                preset = "veryfast"
+            else:  # YouTube
+                output_format = "flv"
+                video_bitrate = "4500k"
+                preset = "veryfast"
             
             # FFmpeg command for streaming
             ffmpeg_cmd = [
@@ -832,14 +1059,16 @@ class ScreenRecorder(QMainWindow):
                 "-vf", "scale=1280:720",  # downscale to 720p
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-preset", "veryfast",
-                "-b:v", "4500k",
+                "-preset", preset,
+                "-b:v", video_bitrate,
+                "-maxrate", video_bitrate,
+                "-bufsize", "9000k",
                 "-g", str(fps * 2),
                 "-c:a", "aac",
                 "-ar", "44100",
                 "-b:a", "128k",
-                "-f", "flv",
-                f"{self.rtmp_url}{self.stream_key}"
+                "-f", output_format,
+                f"{rtmp_url}{self.stream_key}"
             ]
             
             # Start FFmpeg process

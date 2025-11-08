@@ -10,11 +10,10 @@ from styles.modern_styles import (
     COLORS, SPACING, FONTS
 )
 
-
 class ControlButtons(QFrame):
     start_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
-    stream_clicked = pyqtSignal()
+    stream_clicked = pyqtSignal(str)  # Pass platform name
     stop_stream_clicked = pyqtSignal()
     
     def __init__(self, recordings_dir):
@@ -68,14 +67,82 @@ class ControlButtons(QFrame):
         divider.setStyleSheet(f"background-color: {COLORS['border_primary']}; border: none; max-height: 1px; margin: 8px 0;")
         layout.addWidget(divider)
         
-        # Stream button
-        self.stream_button = QPushButton("📡  START LIVE STREAM")
-        self.stream_button.setFont(QFont(FONTS['family_primary'], 13, QFont.Bold))
-        self.stream_button.setFixedHeight(56)
-        self.stream_button.setStyleSheet(get_button_primary())
-        self.stream_button.clicked.connect(self.stream_clicked.emit)
-        self.stream_button.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.stream_button)
+        # Streaming section title
+        stream_title = QLabel("📡  Live Streaming")
+        stream_title.setFont(QFont(FONTS['family_primary'], 14, QFont.Bold))
+        stream_title.setStyleSheet(f"color: {COLORS['text_primary']}; border: none; padding-top: 8px;")
+        layout.addWidget(stream_title)
+        
+        # YouTube Stream button
+        self.stream_youtube_button = QPushButton("�  STREAM TO YOUTUBE")
+        self.stream_youtube_button.setFont(QFont(FONTS['family_primary'], 12, QFont.Bold))
+        self.stream_youtube_button.setFixedHeight(50)
+        self.stream_youtube_button.setStyleSheet(get_button_primary())
+        self.stream_youtube_button.clicked.connect(lambda: self.stream_clicked.emit("youtube"))
+        self.stream_youtube_button.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.stream_youtube_button)
+        
+        # Facebook Stream button
+        self.stream_facebook_button = QPushButton("📘  STREAM TO FACEBOOK")
+        self.stream_facebook_button.setFont(QFont(FONTS['family_primary'], 12, QFont.Bold))
+        self.stream_facebook_button.setFixedHeight(50)
+        self.stream_facebook_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1877f2, stop:1 #0d5ac9);
+                color: white;
+                border-radius: 10px;
+                padding: 12px 24px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #166fe5, stop:1 #0b4fb8);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1567d3, stop:1 #0a4ca7);
+            }
+            QPushButton:disabled {
+                background: #4a5568;
+                color: #9ca3af;
+            }
+        """)
+        self.stream_facebook_button.clicked.connect(lambda: self.stream_clicked.emit("facebook"))
+        self.stream_facebook_button.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.stream_facebook_button)
+        
+        # Twitch Stream button
+        self.stream_twitch_button = QPushButton("🎮  STREAM TO TWITCH")
+        self.stream_twitch_button.setFont(QFont(FONTS['family_primary'], 12, QFont.Bold))
+        self.stream_twitch_button.setFixedHeight(50)
+        self.stream_twitch_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #9146ff, stop:1 #7728d8);
+                color: white;
+                border-radius: 10px;
+                padding: 12px 24px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #8839f2, stop:1 #6d1fd1);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7f2de5, stop:1 #6316ca);
+            }
+            QPushButton:disabled {
+                background: #4a5568;
+                color: #9ca3af;
+            }
+        """)
+        self.stream_twitch_button.clicked.connect(lambda: self.stream_clicked.emit("twitch"))
+        self.stream_twitch_button.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.stream_twitch_button)
         
         # Stop stream button
         self.stop_stream_button = QPushButton("⏹  STOP LIVE STREAM")
@@ -114,5 +181,7 @@ class ControlButtons(QFrame):
     
     def set_streaming_state(self, is_streaming):
         """Update button states based on streaming status"""
-        self.stream_button.setEnabled(not is_streaming)
+        self.stream_youtube_button.setEnabled(not is_streaming)
+        self.stream_facebook_button.setEnabled(not is_streaming)
+        self.stream_twitch_button.setEnabled(not is_streaming)
         self.stop_stream_button.setEnabled(is_streaming)

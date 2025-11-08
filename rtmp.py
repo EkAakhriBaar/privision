@@ -3,8 +3,18 @@ import numpy as np
 import mss
 
 # === USER SETTINGS ===
-RTMP_URL = "rtmp://a.rtmp.youtube.com/live2/"
-STREAM_KEY = "STREAM_KEY"
+# Choose your streaming platform
+PLATFORM = "youtube"  # Options: "youtube", "facebook", "twitch"
+
+# Platform RTMP URLs
+RTMP_URLS = {
+    "youtube": "rtmp://a.rtmp.youtube.com/live2/",
+    "facebook": "rtmps://live-api-s.facebook.com:443/rtmp/",
+    "twitch": "rtmp://live.twitch.tv/app/"
+}
+
+RTMP_URL = RTMP_URLS[PLATFORM]
+STREAM_KEY = "YOUR_STREAM_KEY_HERE"  # Replace with your actual stream key
 
 # === SCREEN SETTINGS ===
 sct = mss.mss()
