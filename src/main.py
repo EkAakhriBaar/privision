@@ -1039,7 +1039,7 @@ class ScreenRecorder(QMainWindow):
             
             # FFmpeg command for streaming
             ffmpeg_cmd = [
-                ffmpeg_path,
+                "ffmpeg",
                 "-loglevel", "warning",
                 "-y",
                 
@@ -1067,6 +1067,9 @@ class ScreenRecorder(QMainWindow):
                 "-c:a", "aac",
                 "-ar", "44100",
                 "-b:a", "128k",
+                "-progress", "-",  # write progress info to stdout
+                "-stats_period", "1",
+
                 "-f", output_format,
                 f"{rtmp_url}{self.stream_key}"
             ]
@@ -1080,6 +1083,7 @@ class ScreenRecorder(QMainWindow):
             )
             
             print("🚀 Streaming started...")
+
             
             # Screen capture for streaming
             import mss
@@ -1091,6 +1095,13 @@ class ScreenRecorder(QMainWindow):
             consecutive_errors = 0
             
             while self.streaming:
+                line = self.ffmpeg_process.stdout.readline()
+                print(line)
+                if not line:
+                    break
+                if "frame=" in line or "out_time_ms" in line:
+                    print("[FFmpeg]", line.strip())
+
                 try:
                     # Capture screen
                     screenshot = sct.grab(monitor)
