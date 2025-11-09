@@ -91,4 +91,7 @@ Optimized for performance — Privision runs smoothly even with multiple layers 
 
 ---
 
+## 🏗️ Architecture and Workflow
+
+![Architecture Overview](https://raw.githubusercontent.com/EkAakhriBaar/privision/refs/heads/main/architecture.png)
 
