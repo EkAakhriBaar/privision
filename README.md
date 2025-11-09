@@ -1,11 +1,9 @@
+
 # 🛡️ Privision — Real-Time Privacy Protection for Streamers
 
-> **Protect your privacy before it’s too late.**
->
-> **Privision** is a smart desktop application that automatically detects and blurs sensitive information — whether it’s text, faces, or on-screen credentials — **in real-time** during streaming or video recording.  
-> Stream safely, share confidently.
-
----
+**Protect your privacy before it’s too late.**
+**Privision** is a smart desktop application that automatically detects and blurs sensitive information — whether it’s text, faces, or on-screen credentials — **in real-time** during streaming or video recording.  
+Stream safely, share confidently.
 
 ## 🚨 Problem
 
@@ -73,7 +71,7 @@ Optimized for performance — Privision runs smoothly even with multiple layers 
 
 ✅ Minimal CPU & GPU overhead  
 ✅ Runs in the background seamlessly  
-✅ Zero lag between capture and broadcast  
+✅ Minimal lag between capture and broadcast  
 
 ---
 
@@ -93,5 +91,4 @@ Optimized for performance — Privision runs smoothly even with multiple layers 
 
 ---
 
-## 🏗️ Architecture Overview
 
